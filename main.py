@@ -28,10 +28,12 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     epoch_cost_cls = 0
     epoch_cost_reg = 0
     epoch_cost_snip = 0
+    epoch_cost_ctx = 0
 
     total_iter = len(train_dataset) // opt['batch_size']
-    cls_loss = MultiCrossEntropyLoss(focal=True)
+    cls_loss  = MultiCrossEntropyLoss(focal=True)
     snip_loss = MultiCrossEntropyLoss(focal=True)
+    ctx_loss  = MultiCrossEntropyLoss(focal=True)  # context supervision (same loss, same label)
 
     for n_iter, (input_data, cls_label, reg_label, snip_label) in enumerate(tqdm(train_loader)):
 
@@ -39,17 +41,18 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
             for g in optimizer.param_groups:
                 g['lr'] = n_iter * (opt['lr']) / total_iter
 
-        act_cls, act_reg, snip_cls = model(input_data.float().cuda())
+        # HAT+ returns 4 values: anchor cls, anchor reg, history snip cls, context cls
+        act_cls, act_reg, snip_cls, ctx_cls = model(input_data.float().cuda())
 
         act_cls.register_hook(partial(cls_loss.collect_grad, cls_label))
         snip_cls.register_hook(partial(snip_loss.collect_grad, snip_label))
+        ctx_cls.register_hook(partial(ctx_loss.collect_grad, snip_label))
 
         cost_reg = 0
         cost_cls = 0
 
         loss = cls_loss_func_(cls_loss, cls_label, act_cls)
         cost_cls = loss
-
         epoch_cost_cls += cost_cls.detach().cpu().numpy()
 
         loss = regress_loss_func(reg_label, act_reg)
@@ -58,10 +61,16 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
 
         loss = cls_loss_func_(snip_loss, snip_label, snip_cls)
         cost_snip = loss
-
         epoch_cost_snip += cost_snip.detach().cpu().numpy()
 
-        cost = opt['alpha'] * cost_cls + opt['beta'] * cost_reg + opt['gamma'] * cost_snip
+        # Context supervision: same snip_label, same focal loss — direct gradient
+        # to HierarchicalContextEncoder so it actually learns current activity
+        loss = cls_loss_func_(ctx_loss, snip_label, ctx_cls)
+        cost_ctx = loss
+        epoch_cost_ctx += cost_ctx.detach().cpu().numpy()
+
+        cost = (opt['alpha'] * cost_cls + opt['beta'] * cost_reg
+                + opt['gamma'] * cost_snip + opt['delta'] * cost_ctx)
 
         epoch_cost += cost.detach().cpu().numpy()
 
@@ -69,7 +78,7 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
         cost.backward()
         optimizer.step()
 
-    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip
+    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip, epoch_cost_ctx
 
 
 def eval_one_epoch(opt, model, test_dataset):
@@ -94,16 +103,27 @@ def train(opt):
     model = MYNET(opt).cuda()
     model = torch.nn.DataParallel(model, device_ids=[0, 1])
 
-    # HAT+: extend slow-LR group to context_encoder + dual_memory_unit
-    # named_parameters() on DataParallel still yields all names, so no .module needed here
-    memory_params = [param for name, param in model.named_parameters()
-                     if "context_encoder" in name or "dual_memory_unit" in name]
-    rest_of_model_params = [param for name, param in model.named_parameters()
-                            if "context_encoder" not in name and "dual_memory_unit" not in name]
+    # HAT+ LR strategy (critical fix):
+    # Only long_mem_encoder + history_token get the slow 1e-6 LR —
+    # these carry HAT's pre-learned history knowledge and mirror HAT's
+    # original differential-LR intent.
+    # All newly added parameters (context_encoder, short_mem_encoder,
+    # memory_fusion, mem_gate, context_anchor_decoder_block, etc.) train
+    # at full opt['lr'] so they can actually learn from scratch.
+    slow_lr_params = [param for name, param in model.named_parameters()
+                      if 'long_mem_encoder' in name
+                      or ('history_token' in name
+                          and 'short_mem_token' not in name
+                          and 'ctx_token' not in name)]
+    full_lr_params = [param for name, param in model.named_parameters()
+                      if not ('long_mem_encoder' in name
+                              or ('history_token' in name
+                                  and 'short_mem_token' not in name
+                                  and 'ctx_token' not in name))]
 
     optimizer = optim.Adam(
-        [{'params': memory_params, 'lr': 1e-6},
-         {'params': rest_of_model_params}],
+        [{'params': slow_lr_params, 'lr': 1e-6},
+         {'params': full_lr_params}],
         lr=opt["lr"],
         weight_decay=opt["weight_decay"]
     )
@@ -118,17 +138,18 @@ def train(opt):
         if n_epoch >= 1:
             warmup = False
 
-        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip = train_one_epoch(
+        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip, epoch_cost_ctx = train_one_epoch(
             opt, model, train_dataset, optimizer, warmup
         )
 
         writer.add_scalars('data/cost', {'train': epoch_cost / (n_iter + 1)}, n_epoch)
-        print("training loss(epoch %d): %.03f, cls - %f, reg - %f, snip - %f, lr - %f" % (
+        print("training loss(epoch %d): %.03f, cls - %f, reg - %f, snip - %f, ctx - %f, lr - %f" % (
             n_epoch,
             epoch_cost / (n_iter + 1),
             epoch_cost_cls / (n_iter + 1),
             epoch_cost_reg / (n_iter + 1),
             epoch_cost_snip / (n_iter + 1),
+            epoch_cost_ctx / (n_iter + 1),
             optimizer.param_groups[-1]["lr"])
         )
 
@@ -179,7 +200,7 @@ def eval_frame(opt, model, dataset):
     epoch_cost_reg = 0
 
     for n_iter, (input_data, cls_label, reg_label, _) in enumerate(tqdm(test_loader)):
-        act_cls, act_reg, _ = model(input_data.float().cuda())
+        act_cls, act_reg, _, _ = model(input_data.float().cuda())
         cost_reg = 0
         cost_cls = 0
 
@@ -473,7 +494,7 @@ def test_online(opt):
             input_queue[-1:, :] = dataset._get_base_data(video_name, idx, idx + 1)
 
             minput = input_queue.unsqueeze(0)
-            act_cls, act_reg, _ = model(minput.cuda())
+            act_cls, act_reg, _, _ = model(minput.cuda())
             act_cls = torch.softmax(act_cls, dim=-1)
 
             cls_anc = act_cls.squeeze(0).detach().cpu().numpy()
