@@ -93,9 +93,15 @@ def train(opt):
     writer = SummaryWriter()
     model = MYNET(opt).cuda()
     
-    rest_of_model_params = [param for name, param in model.named_parameters() if "history_unit" not in name]
-  
-    optimizer = optim.Adam([{'params': model.history_unit.parameters(), 'lr': 1e-6}, {'params': rest_of_model_params}],lr=opt["lr"],weight_decay = opt["weight_decay"])  
+    # HAT+: extend slow-LR group to context_encoder + dual_memory_unit
+    # (mirrors HAT's pattern of giving history_unit a conservative 1e-6 LR)
+    memory_params = [param for name, param in model.named_parameters()
+                     if "context_encoder" in name or "dual_memory_unit" in name]
+    rest_of_model_params = [param for name, param in model.named_parameters()
+                            if "context_encoder" not in name and "dual_memory_unit" not in name]
+    optimizer = optim.Adam([{'params': memory_params, 'lr': 1e-6},
+                             {'params': rest_of_model_params}],
+                           lr=opt["lr"], weight_decay=opt["weight_decay"])
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,step_size = opt["lr_step"])
     
     train_dataset = VideoDataSet(opt,subset="train")      
