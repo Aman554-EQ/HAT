@@ -190,7 +190,19 @@ def parse_opt():
         '--wterm',
         type=bool,
         default=False)    
-    
+
+    # HAT+ hyperparameters
+    parser.add_argument(
+        '--ctx_tokens',
+        type=int,
+        default=8,
+        help='number of compact context tokens in HierarchicalContextEncoder')
+    parser.add_argument(
+        '--short_mem_tokens',
+        type=int,
+        default=8,
+        help='number of short-term memory tokens in DualMemoryUnit')
+
     args = parser.parse_args()
 
     return args
