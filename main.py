@@ -16,7 +16,7 @@ from eval import evaluation_detection
 from tensorboardX import SummaryWriter
 from dataset import VideoDataSet
 from models import MYNET, SuppressNet
-from loss_func import cls_loss_func, cls_loss_func_, regress_loss_func
+from loss_func import cls_loss_func,  regress_loss_func
 from loss_func import MultiCrossEntropyLoss
 from functools import *
 
@@ -31,9 +31,6 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     epoch_cost_ctx = 0
 
     total_iter = len(train_dataset) // opt['batch_size']
-    cls_loss  = MultiCrossEntropyLoss(focal=True)
-    snip_loss = MultiCrossEntropyLoss(focal=True)
-    ctx_loss  = MultiCrossEntropyLoss(focal=True)  # context supervision (same loss, same label)
 
     for n_iter, (input_data, cls_label, reg_label, snip_label) in enumerate(tqdm(train_loader)):
 
@@ -44,14 +41,10 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
         # HAT+ returns 4 values: anchor cls, anchor reg, history snip cls, context cls
         act_cls, act_reg, snip_cls, ctx_cls = model(input_data.float().cuda())
 
-        act_cls.register_hook(partial(cls_loss.collect_grad, cls_label))
-        snip_cls.register_hook(partial(snip_loss.collect_grad, snip_label))
-        ctx_cls.register_hook(partial(ctx_loss.collect_grad, snip_label))
-
         cost_reg = 0
         cost_cls = 0
 
-        loss = cls_loss_func_(cls_loss, cls_label, act_cls)
+        loss = cls_loss_func(cls_label, act_cls, use_focal=True)
         cost_cls = loss
         epoch_cost_cls += cost_cls.detach().cpu().numpy()
 
@@ -59,13 +52,13 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
         cost_reg = loss
         epoch_cost_reg += cost_reg.detach().cpu().numpy()
 
-        loss = cls_loss_func_(snip_loss, snip_label, snip_cls)
+        loss = cls_loss_func(snip_label, snip_cls, use_focal=True)
         cost_snip = loss
         epoch_cost_snip += cost_snip.detach().cpu().numpy()
 
         # Context supervision: same snip_label, same focal loss — direct gradient
         # to HierarchicalContextEncoder so it actually learns current activity
-        loss = cls_loss_func_(ctx_loss, snip_label, ctx_cls)
+        loss = cls_loss_func(snip_label, ctx_cls, use_focal=True)
         cost_ctx = loss
         epoch_cost_ctx += cost_ctx.detach().cpu().numpy()
 
