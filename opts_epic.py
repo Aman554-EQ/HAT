@@ -126,6 +126,11 @@ def parse_opt():
         type=float,
         default=0.5)
     parser.add_argument(
+        '--delta',
+        type=float,
+        default=0.5,
+        help='weight for context supervision loss (HierarchicalContextEncoder)')
+    parser.add_argument(
         '--pptype',
         type=str,
         default="net")
@@ -186,7 +191,19 @@ def parse_opt():
         '--exp',
         type=str,
         default="")
-    
+
+    # HAT+ hyperparameters
+    parser.add_argument(
+        '--ctx_tokens',
+        type=int,
+        default=8,
+        help='number of compact context tokens in HierarchicalContextEncoder')
+    parser.add_argument(
+        '--short_mem_tokens',
+        type=int,
+        default=8,
+        help='number of short-term memory tokens in DualMemoryUnit')
+
     args = parser.parse_args()
 
     return args
