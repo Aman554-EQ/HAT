@@ -139,6 +139,11 @@ def parse_opt():
         type=float,
         default=0.2)
     parser.add_argument(
+        '--delta',
+        type=float,
+        default=0.5,
+        help='weight for context supervision loss (HierarchicalContextEncoder)')
+    parser.add_argument(
         '--pptype',
         type=str,
         default="net")
